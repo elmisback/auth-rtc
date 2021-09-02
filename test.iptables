@@ -1,0 +1,27 @@
+# redirect port 443 to port 8443
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 443 -j REDIRECT --to-port 8443
+
+# send (redirected) HTTPS to the rate limiting chain
+# we use `-m conntrack --ctstate NEW` to only limit new connections (start of request),
+# since this is packet-level, not request-level
+iptables -I INPUT -p tcp --dport 8443 -m conntrack --ctstate NEW -j RATE-LIMIT
+
+# accept ssh + https traffic (handled by external firewall)
+#iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+#iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+#iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+
+# rate limit by source ip
+#
+# uses leaky bucket algorithm with bucket size `burst` and fill rate `upto`
+iptables --new-chain RATE-LIMIT
+
+iptables --append RATE-LIMIT \
+    --match hashlimit \
+    --hashlimit-mode srcip \
+    --hashlimit-upto 12/min \
+    --hashlimit-burst 1 \
+    --hashlimit-name per_ip_conn_rate_limit \
+    --jump ACCEPT
+# drop stuff that fails the test at the end of the chain
+iptables -A RATE-LIMIT -j DROP

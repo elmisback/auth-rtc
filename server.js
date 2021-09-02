@@ -7,8 +7,8 @@ const server = createServer({
   key: readFileSync('/etc/letsencrypt/live/auth-rtc.strcat.xyz/privkey.pem')
 });
 
-const wss1 = new WebSocketServer({ noServer: true });
-const wss2 = new WebSocketServer({ noServer: true });
+const wss1 = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+const wss2 = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
 wss1.on('open', () => {})
 
@@ -32,7 +32,7 @@ wss2.on('connection', function connection(ws) {
 
 
 server.on('upgrade', function upgrade(request, socket, head) {
-  const { pathname } = parse(request.url);
+  const {pathname}  = new URL(request.url, `http://${request.headers.host}`);
 
   if (pathname === '/host') {
     wss1.handleUpgrade(request, socket, head, function done(ws) {
