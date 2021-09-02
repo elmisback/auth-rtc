@@ -1,0 +1,16 @@
+{
+  "name": "rtc-lookup",
+  "version": "0.0.1",
+  "description": "Authenticated discovery for public (but possibly obscure) WebRTC signaling servers",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.17.1",
+    "express-ws": "^5.0.2",
+    "ws": "^8.2.1"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "elmisback",
+  "license": "ISC"
+}
