@@ -79,14 +79,14 @@ const try_import_verify_key = async (base64_pub_key, log) =>
 
 const try_verify = async (public_key, signature, known_message, log) => attempt(crypto.subtle.verify('RSASSA-PKCS1-v1_5', public_key, signature, known_message), log)
 
-const valid_signature = async ({ public_key, signature }) => {
+const valid_signature = async ({ public_key, signature, challenge }) => {
   const pub_key_imported = await try_import_verify_key(public_key, log)
   if (!pub_key_imported) return `unreadable public key`
 
   const signature_imported = attempt(() => base64ToBuffer(signature), log)
   if (!signature_imported) return `unreadable signature`
 
-  const verified = await try_verify(pub_key_imported, signature_imported, per_connection_properties.challenge, log)
+  const verified = await try_verify(pub_key_imported, signature_imported, challenge, log)
   if (verified === undefined) return `internal verify error`
 
   if (!verified) return `signature doesn't match public key`
@@ -104,15 +104,14 @@ host_socket_server.on('connection', function connection(ws) {
     host: unauthenticated_host_name
   }
 
-  const log = (...msg) => global_log(`host ${per_connection_properties.host}::`, ...msg)
+  const log = (...msg) => global_log(`host ${per_connection_properties.host}`, `::`, ...msg)
 
   ws.on('message', async (message) => {
 
     log('message::', message)
     const abort = msg => {
       log('abort::', msg)
-      ws.send(JSON.stringify({ error: msg }))
-      ws.close()
+      attempt(() => ws.close(msg), log)
     }
     const data = try_parse(message, log)
     if (data === undefined) return abort(`Couldn't parse message.`)
@@ -128,7 +127,7 @@ host_socket_server.on('connection', function connection(ws) {
 
       const { public_key, signature } = data
 
-      const out = await valid_signature(data)
+      const out = await valid_signature({ ...data, challenge: per_connection_properties.challenge })
       if (out != 'ok') return abort(out)
 
       const public_key_hash = await try_hash_public_key(public_key, log)
@@ -136,11 +135,10 @@ host_socket_server.on('connection', function connection(ws) {
 
       per_connection_properties.host = public_key_hash
       per_connection_properties.authenticated = true
-      hosts[public_key_hash] = { send: ws.send }
+      hosts[public_key_hash] = { send: msg => attempt(() => ws.send(msg), log) }
       delete per_connection_properties.challenge;
 
-      log('authenticated')
-      return;
+      return log('authenticated')
     } else {
       // Validate the message
       const example_data = { to: '', message: '' }
@@ -174,16 +172,19 @@ host_socket_server.on('connection', function connection(ws) {
   })
 
   // A challenge message will look like {"challenge":"0.3038331491796824"} 
-  ws.send(JSON.stringify({ challenge: per_connection_properties.challenge }))
+  attempt(() => ws.send(JSON.stringify({ challenge: per_connection_properties.challenge })), log)
 
   // Schedule cleanup
-  setTimeout(() => per_connection_properties.authenticated ? 'good' : ws.close(), timeout_ms)
+  setTimeout(() => per_connection_properties.authenticated ? 'good' : attempt(() => ws.close(`failed to authenticate within ${timeout_ms} ms`), log), timeout_ms)
 
 })
+
+const already_terminated = ws => ws.readyState in [WebSocket.CLOSED, WebSocket.CLOSING]
 
 transient_socket_server.on('connection', function connection(ws) {
   const unauthenticated_transient_name = '<not authenticated>'
   const timeout_ms = 5 * 1000
+  const max_connection_ms = 10 * 1000
 
   const per_connection_properties = {
     challenge: Math.random().toString(),
@@ -194,9 +195,71 @@ transient_socket_server.on('connection', function connection(ws) {
   }
   const log = (...msg) => global_log(`transient ${per_connection_properties.transient}::`, ...msg)
 
-  ws.on('message', function incoming(message) {
-    console.log('received: %s', message);
-  });
+  ws.on('message', async (message) => {
+    log('message::', message)
+    const abort = msg => {
+      log('abort::', msg)
+      attempt(() => ws.close(msg), log)
+    }
+    const data = try_parse(message, log)
+    if (data === undefined) return abort(`Couldn't parse message.`)
+
+    if (!per_connection_properties.authenticated) {
+
+      // Validate the message
+      const example_data = { public_key: '', signature: '', target: '<host_public_key_hash>' }
+      if (!check_obj_has_all_keys(
+        Object.keys(example_data),
+        data,
+        k => abort(`missing key in message: "${k}"`))) return;
+      
+      const { public_key, signature, target } = data
+
+      if (!(target in hosts)) return abort(`target host unavailable`)
+
+      const out = await valid_signature({ ...data, challenge: per_connection_properties.challenge })
+      if (out != 'ok') return abort(out)
+
+      const public_key_hash = await try_hash_public_key(public_key, log)
+      if (!public_key_hash) return abort(`unhashable public key`)
+
+      per_connection_properties.transient = public_key_hash
+      per_connection_properties.authenticated = true
+
+      const wrapped_send = msg => {
+        attempt(() => ws.send(msg), log)
+        per_connection_properties.count_remaining_receive -= 1
+        if (per_connection_properties.count_remaining_receive <= 0) ws.close()
+      }
+      transients[public_key_hash] = { target, send: wrapped_send }
+      delete per_connection_properties.challenge
+
+      // Schedule cleanup
+      setTimeout(() => !already_terminated(ws) ? attempt(() => ws.close(`failed to finish transaction within ${max_connection_ms} ms`), log) : 'good', max_connection_ms)
+
+      return log('authenticated')
+    } else {
+      // Validate the message
+      const example_data = { message: '' }
+      if (!check_obj_has_all_keys(
+        Object.keys(example_data),
+        data,
+        k => abort(`missing key in message: "${k}"`))) return;
+
+      const { message } = data
+      
+      const { transient } = per_connection_properties
+      const target = transients[transient]
+      if (!(target in hosts)) return abort('target host unavailable')
+      
+      const { send } = hosts[target]
+      
+      send(JSON.stringify({from: transient, message }))
+
+      per_connection_properties.count_remaining_send -= 1
+      if (per_connection_properties.count_remaining_send <= 0) return ws.close()
+    }
+  })
 
   ws.on('close', () => {
     const transient = per_connection_properties.transient
@@ -206,10 +269,10 @@ transient_socket_server.on('connection', function connection(ws) {
   })
 
   // A challenge message will look like {"challenge":"0.3038331491796824"} 
-  ws.send(JSON.stringify({ challenge: per_connection_properties.challenge }))
+  attempt(() => ws.send(JSON.stringify({ challenge: per_connection_properties.challenge })), log)
 
   // Schedule cleanup
-  setTimeout(() => per_connection_properties.authenticated ? 'good' : ws.close(), timeout_ms)
+  setTimeout(() => per_connection_properties.authenticated || already_terminated(ws) ? 'good' : ws.close(`failed to authenticate within ${timeout_ms} ms`), timeout_ms)
 });
 
 
