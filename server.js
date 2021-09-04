@@ -12,7 +12,7 @@ const server = createServer({
 const host_socket_server = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 const transient_socket_server = new WebSocketServer({ noServer: true, maxPayload: 1024 });
 
-const global_log = (...msg) => console.log(`${new Date().toUTCString()}::`, ...msg)
+const global_log = (...msg) => console.log(`${new Date().toUTCString()}`, `::`, ...msg)
 const log = global_log
 const hosts = {}  // Map<public_key_hash, {send : string -> ()}>
 const transients = {} // Map<public_key_hash, {target : public_key_hash, send : string -> ()}
@@ -108,9 +108,9 @@ host_socket_server.on('connection', function connection(ws) {
 
   ws.on('message', async (message) => {
 
-    log('message::', message)
+    log('message','::', message)
     const abort = msg => {
-      log('abort::', msg)
+      log('abort','::', msg)
       attempt(() => ws.close(msg), log)
     }
     const data = try_parse(message, log)
@@ -193,12 +193,12 @@ transient_socket_server.on('connection', function connection(ws) {
     count_remaining_send: 2,
     count_remaining_receive: 2
   }
-  const log = (...msg) => global_log(`transient ${per_connection_properties.transient}::`, ...msg)
+  const log = (...msg) => global_log(`transient ${per_connection_properties.transient}`, `::`, ...msg)
 
   ws.on('message', async (message) => {
-    log('message::', message)
+    log('message', '::', message)
     const abort = msg => {
-      log('abort::', msg)
+      log('abort','::', msg)
       attempt(() => ws.close(msg), log)
     }
     const data = try_parse(message, log)
