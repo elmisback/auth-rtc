@@ -184,14 +184,14 @@ const already_terminated = ws => ws.readyState in [WebSocket.CLOSED, WebSocket.C
 transient_socket_server.on('connection', function connection(ws) {
   const unauthenticated_transient_name = '<not authenticated>'
   const timeout_ms = 5 * 1000
-  const max_connection_ms = 10 * 1000
+  const max_connection_ms = 20 * 1000
 
   const per_connection_properties = {
     challenge: Math.random().toString(),
     authenticated: false,
     transient: unauthenticated_transient_name,
-    count_remaining_send: 2,
-    count_remaining_receive: 2
+    count_remaining_send: 3,
+    count_remaining_receive: 3
   }
   const log = (...msg) => global_log(`transient ${per_connection_properties.transient}`, `::`, ...msg)
 
@@ -237,28 +237,27 @@ transient_socket_server.on('connection', function connection(ws) {
       // Schedule cleanup
       setTimeout(() => !already_terminated(ws) ? attempt(() => ws.close(`failed to finish transaction within ${max_connection_ms} ms`), log) : 'good', max_connection_ms)
 
-      return log('authenticated')
-    } else {
-      // Validate the message
-      const example_data = { message: '' }
-      if (!check_obj_has_all_keys(
-        Object.keys(example_data),
-        data,
-        k => abort(`missing key in message: "${k}"`))) return;
-
-      const { message } = data
-      
-      const { transient } = per_connection_properties
-      const target = transients[transient]
-      if (!(target in hosts)) return abort('target host unavailable')
-      
-      const { send } = hosts[target]
-      
-      send(JSON.stringify({from: transient, message }))
-
-      per_connection_properties.count_remaining_send -= 1
-      if (per_connection_properties.count_remaining_send <= 0) return ws.close()
+      //return log('authenticated')
     }
+    // Validate the message
+    const example_data = { message: '' }
+    if (!check_obj_has_all_keys(
+      Object.keys(example_data),
+      data,
+      k => abort(`missing key in message: "${k}"`))) return;
+
+    const { message } = data
+    
+    const { transient } = per_connection_properties
+    const target = transients[transient]
+    if (!(target in hosts)) return abort('target host unavailable')
+    
+    const { send } = hosts[target]
+    
+    send(JSON.stringify({from: transient, message }))
+
+    per_connection_properties.count_remaining_send -= 1
+    if (per_connection_properties.count_remaining_send <= 0) return ws.close()
   })
 
   ws.on('close', () => {
