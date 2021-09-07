@@ -1,21 +1,24 @@
 import { createServer } from 'https'
 import { readFileSync } from 'fs'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, WebSocket } from 'ws'
 import { webcrypto as crypto } from 'crypto'
-
 
 const server = createServer({
   cert: readFileSync('/etc/letsencrypt/live/auth-rtc.strcat.xyz/fullchain.pem'),
   key: readFileSync('/etc/letsencrypt/live/auth-rtc.strcat.xyz/privkey.pem')
 });
 
-const host_socket_server = new WebSocketServer({ noServer: true, maxPayload: 1024 });
-const transient_socket_server = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+const host_socket_server = new WebSocketServer({
+  noServer: true, maxPayload: 2 * 1024
+});
+const transient_socket_server = new WebSocketServer({
+  noServer: true, maxPayload: 2 * 1024
+});
 
 const global_log = (...msg) => console.log(`${new Date().toUTCString()}`, `::`, ...msg)
 const log = global_log
-const hosts = {}  // Map<public_key_hash, {send : string -> ()}>
-const transients = {} // Map<public_key_hash, {target : public_key_hash, send : string -> ()}
+const hosts = {}  // Map<public_key, {send : string -> ()}>
+const transients = {} // Map<public_key, {host : public_key, send : string -> ()}
 
 const attempt = (fn, onerror = (error) => { }) => {
   try {
@@ -71,13 +74,13 @@ const try_import_verify_key = async (base64_pub_key, log) =>
         'spki',
         base64ToBuffer(base64_pub_key),
         {
-          name: "RSASSA-PKCS1-v1_5",
-          hash: "SHA-256",
+          name: 'ECDSA',
+          namedCurve: "P-384"
         },
         true,
         ["verify"]), log)
 
-const try_verify = async (public_key, signature, known_message, log) => attempt(crypto.subtle.verify('RSASSA-PKCS1-v1_5', public_key, signature, known_message), log)
+const try_verify = async (public_key, signature, known_message, log) => attempt(() => crypto.subtle.verify({ name: 'ECDSA', hash: "SHA-256" }, public_key, signature, known_message), log)
 
 const valid_signature = async ({ public_key, signature, challenge }) => {
   const pub_key_imported = await try_import_verify_key(public_key, log)
@@ -97,6 +100,7 @@ const valid_signature = async ({ public_key, signature, challenge }) => {
 host_socket_server.on('connection', function connection(ws) {
   const unauthenticated_host_name = '<not authenticated>'
   const timeout_ms = 5 * 1000
+  const heartbeat_ms = 54 * 1000
 
   const per_connection_properties = {
     challenge: Math.random().toString(),
@@ -107,11 +111,14 @@ host_socket_server.on('connection', function connection(ws) {
   const log = (...msg) => global_log(`host ${per_connection_properties.host}`, `::`, ...msg)
 
   ws.on('message', async (message) => {
-
-    log('message','::', message)
+    if ((message) == 'pong') {
+      no_heartbeat = false
+      return
+    }
+    log('message', '::', new TextDecoder().decode(message))
     const abort = msg => {
       log('abort','::', msg)
-      attempt(() => ws.close(msg), log)
+      attempt(() => ws.close(1008, msg), log)
     }
     const data = try_parse(message, log)
     if (data === undefined) return abort(`Couldn't parse message.`)
@@ -130,12 +137,13 @@ host_socket_server.on('connection', function connection(ws) {
       const out = await valid_signature({ ...data, challenge: per_connection_properties.challenge })
       if (out != 'ok') return abort(out)
 
-      const public_key_hash = await try_hash_public_key(public_key, log)
-      if (!public_key_hash) return abort(`unhashable public key`)
+      // const public_key_hash = await try_hash_public_key(public_key, log)
+      // if (!public_key_hash) return abort(`unhashable public key`)
 
-      per_connection_properties.host = public_key_hash
+      per_connection_properties.host = public_key
       per_connection_properties.authenticated = true
-      hosts[public_key_hash] = { send: msg => attempt(() => ws.send(msg), log) }
+      if (hosts[public_key]) hosts[public_key].close(1008, 'new connection established')
+      hosts[public_key] = { send: msg => attempt(() => ws.send(msg), log), close: (...args) => ws.close(...args) }
       delete per_connection_properties.challenge;
 
       return log('authenticated')
@@ -152,11 +160,11 @@ host_socket_server.on('connection', function connection(ws) {
       if (!(to in transients)) return log('tried to send to nonexistent transient')
       
 
-      const { target, send } = transients[to]
+      const { host, send } = transients[to]
 
-      if (target != per_connection_properties.host) {
+      if (host != per_connection_properties.host) {
         log('tried to send to unexpected transient')
-        return log('transient expected', target)
+        return log('transient expected', host)
       }
       
       send(JSON.stringify({ message }))
@@ -165,11 +173,26 @@ host_socket_server.on('connection', function connection(ws) {
 
 
   ws.on('close', () => {
-    const host = per_connection_properties.host
-    log('attempting to delete host', host)
-    const output = host in hosts ? (delete hosts[host], 'deleted') : 'nothing to clean up'
-    log(output)
+    // TODO use a heartbeat for cleanup and keeping the connection open
+    // const host = per_connection_properties.host
+    // log('attempting to delete host', host)
+    // const output = host in hosts ? (delete hosts[host], 'deleted') : 'nothing to clean up'
+    // log(output)
   })
+
+  let no_heartbeat = false
+  const schedule_heartbeat = () => setTimeout(() => {
+    if (no_heartbeat) {
+      const host = per_connection_properties.host
+      host in hosts ? (delete hosts[host], 'deleted') : 'nothing to clean up'
+      ws.close(1008, `no heartbeat`)
+      return;
+    }
+    no_heartbeat = true
+    ws.send('ping')
+    schedule_heartbeat()
+  }, heartbeat_ms)
+  schedule_heartbeat()
 
   // A challenge message will look like {"challenge":"0.3038331491796824"} 
   attempt(() => ws.send(JSON.stringify({ challenge: per_connection_properties.challenge })), log)
@@ -196,10 +219,10 @@ transient_socket_server.on('connection', function connection(ws) {
   const log = (...msg) => global_log(`transient ${per_connection_properties.transient}`, `::`, ...msg)
 
   ws.on('message', async (message) => {
-    log('message', '::', message)
+    log('message', '::', new TextDecoder().decode(message))
     const abort = msg => {
       log('abort','::', msg)
-      attempt(() => ws.close(msg), log)
+      attempt(() => ws.close(1008, msg), log)
     }
     const data = try_parse(message, log)
     if (data === undefined) return abort(`Couldn't parse message.`)
@@ -207,37 +230,37 @@ transient_socket_server.on('connection', function connection(ws) {
     if (!per_connection_properties.authenticated) {
 
       // Validate the message
-      const example_data = { public_key: '', signature: '', target: '<host_public_key_hash>' }
+      const example_data = { public_key: '', signature: '', host: '<host_public_key>' }
       if (!check_obj_has_all_keys(
         Object.keys(example_data),
         data,
         k => abort(`missing key in message: "${k}"`))) return;
       
-      const { public_key, signature, target } = data
+      const { public_key, signature, host } = data
 
-      if (!(target in hosts)) return abort(`target host unavailable`)
+      if (!(host in hosts)) return abort(`host unavailable`)
 
       const out = await valid_signature({ ...data, challenge: per_connection_properties.challenge })
       if (out != 'ok') return abort(out)
 
-      const public_key_hash = await try_hash_public_key(public_key, log)
-      if (!public_key_hash) return abort(`unhashable public key`)
+      // const public_key_hash = await try_hash_public_key(public_key, log)
+      // if (!public_key_hash) return abort(`unhashable public key`)
 
-      per_connection_properties.transient = public_key_hash
+      per_connection_properties.transient = public_key
       per_connection_properties.authenticated = true
 
       const wrapped_send = msg => {
         attempt(() => ws.send(msg), log)
         per_connection_properties.count_remaining_receive -= 1
-        if (per_connection_properties.count_remaining_receive <= 0) ws.close()
+        if (per_connection_properties.count_remaining_receive <= 0) ws.close('all messages sent')
       }
-      transients[public_key_hash] = { target, send: wrapped_send }
+      transients[public_key] = { host, send: wrapped_send }
       delete per_connection_properties.challenge
 
       // Schedule cleanup
       setTimeout(() => !already_terminated(ws) ? attempt(() => ws.close(`failed to finish transaction within ${max_connection_ms} ms`), log) : 'good', max_connection_ms)
 
-      //return log('authenticated')
+      log('authenticated')
     }
     // Validate the message
     const example_data = { message: '' }
@@ -246,13 +269,13 @@ transient_socket_server.on('connection', function connection(ws) {
       data,
       k => abort(`missing key in message: "${k}"`))) return;
 
-    const { message } = data
+    message = data.message
     
     const { transient } = per_connection_properties
-    const target = transients[transient]
-    if (!(target in hosts)) return abort('target host unavailable')
+    const { host } = transients[transient]
+    if (!(host in hosts)) return abort('host unavailable')
     
-    const { send } = hosts[target]
+    const { send } = hosts[host]
     
     send(JSON.stringify({from: transient, message }))
 
@@ -262,7 +285,7 @@ transient_socket_server.on('connection', function connection(ws) {
 
   ws.on('close', () => {
     const transient = per_connection_properties.transient
-    log('attempting to delete host', transient)
+    log('attempting to delete transient', transient)
     const output = transient in transients ? (delete transients[transient], 'deleted') : 'nothing to clean up'
     log(output)
   })
