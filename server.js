@@ -9,10 +9,10 @@ const server = createServer({
 });
 
 const host_socket_server = new WebSocketServer({
-  noServer: true, maxPayload: 2 * 1024
+  noServer: true, maxPayload: 4 * 1024
 });
 const transient_socket_server = new WebSocketServer({
-  noServer: true, maxPayload: 2 * 1024
+  noServer: true, maxPayload: 4 * 1024
 });
 
 const global_log = (...msg) => console.log(`${new Date().toUTCString()}`, `::`, ...msg)
