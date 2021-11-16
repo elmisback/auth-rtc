@@ -198,7 +198,7 @@ host_socket_server.on('connection', function connection(ws) {
   attempt(() => ws.send(JSON.stringify({ challenge: per_connection_properties.challenge })), log)
 
   // Schedule cleanup
-  setTimeout(() => per_connection_properties.authenticated ? 'good' : attempt(() => ws.close(`failed to authenticate within ${timeout_ms} ms`), log), timeout_ms)
+  setTimeout(() => per_connection_properties.authenticated ? 'good' : attempt(() => ws.close(1008, `failed to authenticate within ${timeout_ms} ms`), log), timeout_ms)
 
 })
 
