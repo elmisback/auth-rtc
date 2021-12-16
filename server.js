@@ -174,6 +174,7 @@ host_socket_server.on('connection', function connection(ws) {
 
   ws.on('close', () => {
     // TODO use a heartbeat for cleanup and keeping the connection open
+    log("A websocket closed")
     // const host = per_connection_properties.host
     // log('attempting to delete host', host)
     // const output = host in hosts ? (delete hosts[host], 'deleted') : 'nothing to clean up'
